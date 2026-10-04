@@ -38,6 +38,7 @@ Steam 英文版在 >21:9 的分辨率下 UI 直接散架——标题漂移、元
 | 界面素材 | `C_SUBTI`（副标题 logo）、`C_STATUS`、`C_ICON1`、`C_NOTE1` → 日版 |
 | 角色立绘 | `C_STCH00`–`C_STCH36` 共 22 张入队立绘 → 日版（ARGB1555 转 32bpp，修复 16 位色不渲染） |
 | 卡片素材 | `ED6_DT24` 全部 `C_*`（标题界面、剧情卡、地名卡、门标题卡、笔记本等）→ 日版 |
+| 战斗招式名 | `ED6_DT30` 全部 `AS/MS` 战斗脚本（主角战技 + 敌方招式，共 1350 项）→ 日版 |
 | 结尾 STAFF 表 | `ED6_DT51` → 日版原片（含 Evolution 声优表；`-StaffRoll` 开启，有 ffmpeg 时自动转码为可播放的 XviD AVI） |
 | 菜单 | 写入 `dll\lang_jpn.dll`，系统菜单/设置界面日文 |
 | 渲染 | `HighResoText=0`（经典字体渲染，修复排版漂移）、`HighResoAssets=0`（使用日版标准素材） |
