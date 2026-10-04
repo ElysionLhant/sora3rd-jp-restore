@@ -416,6 +416,23 @@ if (-not $NoTextures) {
   $names = @()
   for ($i = 0; $i -lt $en24.Count; $i++) { if ($en24.Names[$i] -like 'C_*') { $names += $en24.Names[$i] } }
   $en24.ReplaceFrom($jp24, $true, [string[]]$names)
+
+  # C_TITLE1 特殊处理：整包替换会让难度按钮丢失（日版图集布局不同）——
+  # 合成"日版顶部 185 行（空轨 logo）+ 英文版底部（按钮/装饰）"
+  $enTitle1 = [LB]::Load("$bk\ED6_DT24.dir", "$bk\ED6_DT24.dat")
+  $biE = $enTitle1.Find('C_TITLE1._CH'); $biJ = $jp24.Find('C_TITLE1._CH'); $biC = $en24.Find('C_TITLE1._CH')
+  if ($biE -ge 0 -and $biJ -ge 0 -and $biC -ge 0) {
+    $rawE = [Ed6]::Decompress($enTitle1.Contents[$biE])
+    $rawJ = [Ed6]::Decompress($jp24.Contents[$biJ])
+    if ($rawE.Length -eq $rawJ.Length -and $rawE.Length -ge (512 * 512 * 2)) {
+      $spliced = [byte[]]$rawE.Clone()
+      [Array]::Copy($rawJ, 0, $spliced, 0, 185 * 512 * 2)
+      $packed = [Ed6]::CompressLiterals($spliced)
+      $en24.Contents[$biC] = $packed
+      $en24.SetFields($biC, $packed.Length, 0x000F0000)
+      Ok '  C_TITLE1：已合成（日版 logo 顶行 + 英文版按钮区）'
+    }
+  }
   $en24.Save("$GameDir\ED6_DT24.dir", "$GameDir\ED6_DT24.dat")
   Ok "DT24：$($names.Count) 项素材换为日版"
 }
