@@ -40,6 +40,7 @@ Steam 英文版在 >21:9 的分辨率下 UI 直接散架——标题漂移、元
 | 卡片素材 | `ED6_DT24` 全部 `C_*`（标题界面、剧情卡、地名卡、门标题卡、笔记本等）→ 日版 |
 | 战斗招式名 | `ED6_DT30` 全部 `AS/MS` 战斗脚本（主角战技 + 敌方招式，共 1350 项）→ 日版 |
 | 结尾 STAFF 表 | `ED6_DT51` → 日版原片（含 Evolution 声优表；`-StaffRoll` 开启，有 ffmpeg 时自动转码为可播放的 XviD AVI） |
+| 剧情语音 | （可选，`extras/voice/`）Evo 版全剧情语音注入：语音 ID 按结构对齐灌入日版剧本，日文本 + 日语音 |
 | 菜单 | 写入 `dll\lang_jpn.dll`，系统菜单/设置界面日文 |
 | 渲染 | `HighResoText=0`（经典字体渲染，修复排版漂移）、`HighResoAssets=0`（使用日版标准素材） |
 | 还原 | 任意时刻一键还原英文原版（转换前自动备份） |
@@ -82,6 +83,10 @@ powershell -File Convert-Sora3JP.ps1 -Restore [-BackupDir "指定备份目录"]
 - `-StaffRoll`：同时替换结尾 STAFF 表影像为日版原片。
 - 每次转换都会在 `backup\` 下按时间戳新建一份英文原版备份，绝不覆盖旧备份。
 - Steam "验证游戏完整性"或游戏更新会把封包还原为英文 → 重新运行一次一键转换即可。
+
+## 剧情语音（可选）
+
+PC 版没有剧情语音（Evo/PSV 独占），但可以把 Evo 语音移植进来：中文社区 J31why 的语音整合包解决了"英文版 + 语音"，本仓库的 `extras/voice/` 管线解决"**日文版 + 语音**"——从 J31why 语音剧本中提取每句对白的语音 ID，按剧本结构对齐（表情码 `#xxxF` 验证 + 消息分段 + token 锚定），注入日版剧本重新编译，配合 SoraVoice Lite（`dinput8.dll` 代理加载 `voice/ed_voice.dll`）播放 `voice/ogg/` 下的 Evo 语音。实测 96.5% 的语音指令成功对齐，可疑对齐一律拒绝（宁可缺句，不能错句）。详见 `extras/voice/README.md`。
 
 ## 超宽屏伪全屏（可选）
 
@@ -131,6 +136,7 @@ Convert-Sora3JP.ps1        核心转换/还原脚本（PS + 内嵌 C# 封包器/
 一键转换.bat                双击用：转换到日文
 还原.bat                    双击用：还原英文版
 extras\16x9-pillarbox\      超宽屏伪全屏小工具（watch.ps1 + steamwrap.bat，相对路径）
+extras\voice\               剧情语音注入管线（voice_merge.py + 文档，需自备 J31why 语音包）
 backup\                     自动备份（每次转换一份时间戳副本，本地产物勿上传）
 README.md                   本文档
 .gitignore                  排除 backup\ 与游戏数据文件
