@@ -316,7 +316,7 @@ if ($Restore) {
       Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
   }
   if (-not $BackupDir -or -not (Test-Path "$BackupDir\ED6_DT21.dat")) { Fail "找不到备份（$BackupDir）" }
-  foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24') {
+  foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24', 'ED6_DT30') {
     if (Test-Path "$BackupDir\$a.dat") { Copy-Item "$BackupDir\$a.dat", "$BackupDir\$a.dir" $GameDir -Force }
   }
   if (Test-Path "$BackupDir\ED6_DT51.dat") { Copy-Item "$BackupDir\ED6_DT51.dat" $GameDir -Force }
@@ -348,7 +348,7 @@ Ok "日文版：$jpDir"
 # ---------- 备份 ----------
 $bk = Join-Path $backupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
 New-Item -ItemType Directory -Force $bk | Out-Null
-foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24') {
+foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24', 'ED6_DT30') {
   Copy-Item "$GameDir\$a.dat", "$GameDir\$a.dir" $bk
 }
 if ($StaffRoll -and (Test-Path "$GameDir\ED6_DT51.dat")) { Copy-Item "$GameDir\ED6_DT51.dat" $bk }
@@ -448,6 +448,15 @@ if (-not $NoTextures) {
   }
   $en24.Save("$GameDir\ED6_DT24.dir", "$GameDir\ED6_DT24.dat")
   Ok "DT24：$($names.Count) 项素材换为日版"
+
+  Write-Host '处理 DT30（战斗脚本/招式名）…'
+  $en30 = [LB]::Load("$GameDir\ED6_DT30.dir", "$GameDir\ED6_DT30.dat")
+  $jp30 = [LB]::Load("$jpDir\ED6_DT30.dir", "$jpDir\ED6_DT30.dat")
+  $names30 = @()
+  for ($i = 0; $i -lt $en30.Count; $i++) { if ($en30.Names[$i] -match '^[AM]S') { $names30 += $en30.Names[$i] } }
+  $en30.ReplaceFrom($jp30, $true, [string[]]$names30)
+  $en30.Save("$GameDir\ED6_DT30.dir", "$GameDir\ED6_DT30.dat")
+  Ok "DT30：$($names30.Count) 个战斗脚本换为日版（招式名全数日文）"
 }
 
 # ---------- 结尾 STAFF 表（可选） ----------
