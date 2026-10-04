@@ -1,0 +1,5 @@
+# 游戏数据与本地产物，切勿上传
+backup/
+*.zip
+ED6_*.dat
+ED6_*.dir
