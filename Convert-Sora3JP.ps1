@@ -3,8 +3,9 @@
 .SYNOPSIS
   Sora3rd JP Restore - 空之轨迹 the 3rd (Steam 英文版) 日文还原补丁器
 .DESCRIPTION
-  把用户自备的 DLsite 日文版 (VJ009177) 中的剧本、系统文本库、原版字体
-  灌入 Steam 英文版。本工具不含任何游戏数据。
+  把用户自备的 DLsite 日文版 (VJ009177) 中的剧本、系统文本库、原版字体、
+  预渲染素材（标题/卡片/立绘/结尾 STAFF 表）灌入 Steam 英文版。
+  本工具不含任何游戏数据。
 .PARAMETER GameDir
   Steam 英文版游戏目录（含 ed6_win3_DX9.exe）。缺省自动从注册表探测。
 .PARAMETER JpSource
@@ -15,8 +16,13 @@
   指定用于还原的备份目录（缺省取 backup\ 下最新一个）。
 .PARAMETER KeepHdFont
   保留 XSEED 高清字体，不换日版原点位图字体（也不改 HighResoText）。
+.PARAMETER NoTextures
+  跳过预渲染素材替换（只换剧本/文本库/字体）。
+.PARAMETER StaffRoll
+  同时替换结尾 STAFF 表影像（ED6_DT51）。若检测到 ffmpeg 则转码为可播放的
+  XviD AVI，否则直接拷入日版 MPEG（部分系统缺少 MPEG-PS 解码器时无法播放）。
 .EXAMPLE
-  .\Convert-Sora3JP.ps1 -JpSource D:\dl\sora3rd_w8\ED_SORA3
+  .\Convert-Sora3JP.ps1 -JpSource D:\dl\sora3rd_w8\ED_SORA3 -StaffRoll
 .EXAMPLE
   .\Convert-Sora3JP.ps1 -Restore
 #>
@@ -26,7 +32,9 @@ param(
   [string]$JpSource,
   [switch]$Restore,
   [string]$BackupDir,
-  [switch]$KeepHdFont
+  [switch]$KeepHdFont,
+  [switch]$NoTextures,
+  [switch]$StaffRoll
 )
 $ErrorActionPreference = 'Stop'
 
@@ -34,6 +42,7 @@ $cs = @'
 using System;
 using System.IO;
 using System.Text;
+using System.Collections.Generic;
 
 public class LB {
   public int Count;
@@ -83,6 +92,12 @@ public class LB {
     return -1;
   }
 
+  public void SetFields(int i, int size, uint flags) {
+    Array.Copy(BitConverter.GetBytes(size), 0, Records[i], 16, 4);
+    Array.Copy(BitConverter.GetBytes(flags), 0, Records[i], 20, 4);
+    Array.Copy(BitConverter.GetBytes(size), 0, Records[i], 24, 4);
+  }
+
   public void GraftFrom(LB src, params string[] names) {
     foreach (var n in names) {
       int si = src.Find(n);
@@ -95,12 +110,12 @@ public class LB {
     }
   }
 
-  public void ReplaceFrom(LB src, params string[] names) {
+  public void ReplaceFrom(LB src, bool skipMissing, params string[] names) {
     foreach (var n in names) {
       int si = src.Find(n);
-      if (si < 0) throw new Exception("src missing " + n);
+      if (si < 0) { if (skipMissing) continue; throw new Exception("src missing " + n); }
       int bi = Find(n);
-      if (bi < 0) throw new Exception("base missing " + n);
+      if (bi < 0) { if (skipMissing) continue; throw new Exception("base missing " + n); }
       Records[bi] = src.Records[si];
       Contents[bi] = src.Contents[si];
       Names[bi] = src.Names[si];
@@ -119,8 +134,7 @@ public class LB {
       for (int i = 0; i < Count; i++) {
         offs[i] = (int)fs.Position;
         fs.Write(Contents[i], 0, Contents[i].Length);
-        byte[] o = BitConverter.GetBytes(offs[i]);
-        Array.Copy(o, 0, Records[i], 32, 4);
+        Array.Copy(BitConverter.GetBytes(offs[i]), 0, Records[i], 32, 4);
       }
       offs[Count] = (int)fs.Position;
       fs.Position = tablePos;
@@ -130,6 +144,151 @@ public class LB {
       fs.Write(DirHeader, 0, 16);
       for (int i = 0; i < Count; i++) fs.Write(Records[i], 0, 36);
     }
+  }
+}
+
+public static class Bz {
+  // Falcom bzip decompressor (mode1 + mode2)
+  class R {
+    public byte[] d; public int p;
+    public R(byte[] x) { d = x; p = 0; }
+    public int U8() { return d[p++]; }
+    public int U16() { int v = BitConverter.ToUInt16(d, p); p += 2; return v; }
+    public byte[] Slice(int n) { var v = new byte[n]; Array.Copy(d, p, v, 0, n); p += n; return v; }
+    public int Left { get { return d.Length - p; } }
+  }
+  static int bitsVal, bitsNext;
+  static void Renew(R f) { bitsVal = f.U16(); bitsNext = 1; }
+  static int Bit(R f) {
+    if (bitsNext == 0) Renew(f);
+    int v = (bitsVal & bitsNext) != 0 ? 1 : 0;
+    bitsNext = (bitsNext << 1) & 0xFFFF;
+    return v;
+  }
+  static int Bits(int n, R f) {
+    int x = 0;
+    for (int i = 0; i < n % 8; i++) x = (x << 1) | Bit(f);
+    for (int i = 0; i < n / 8; i++) x = (x << 8) | f.U8();
+    return x;
+  }
+  static int ReadCount(R f) {
+    if (Bit(f) == 1) return 2;
+    if (Bit(f) == 1) return 3;
+    if (Bit(f) == 1) return 4;
+    if (Bit(f) == 1) return 5;
+    if (Bit(f) == 1) return 6 + Bits(3, f);
+    return 14 + Bits(8, f);
+  }
+  static void Rep(List<byte> o, int n, int off) {
+    for (int i = 0; i < n; i++) o.Add(o[o.Count - off]);
+  }
+  static void Const(List<byte> o, int n, int v) { for (int i = 0; i < n; i++) o.Add((byte)v); }
+
+  static void Mode2(byte[] data, List<byte> o) {
+    var f = new R(data);
+    bitsVal = 0; bitsNext = 0;
+    Renew(f); bitsNext <<= 8;
+    while (true) {
+      if (Bit(f) == 0) { o.Add((byte)f.U8()); continue; }
+      if (Bit(f) == 0) {
+        int off = Bits(8, f), n = ReadCount(f);
+        Rep(o, n, off);
+      } else {
+        int o2 = Bits(13, f);
+        if (o2 == 0) break;
+        if (o2 == 1) {
+          int n = (Bit(f) == 1) ? Bits(12, f) : Bits(4, f);
+          Const(o, 14 + n, f.U8());
+        } else {
+          int n = ReadCount(f);
+          Rep(o, n, o2);
+        }
+      }
+    }
+  }
+
+  static void Mode1(byte[] data, List<byte> o) {
+    var f = new R(data);
+    int lastO = 0;
+    while (f.Left > 0) {
+      int c = f.U8();
+      if ((c & 0xC0) == 0x00) {
+        int n = c & 0x1F;
+        if ((c & 0x20) != 0) n = (n << 8) | f.U8();
+        o.AddRange(f.Slice(n));
+      } else if ((c & 0xE0) == 0x40) {
+        int n = c & 0x0F;
+        if ((c & 0x10) != 0) n = (n << 8) | f.U8();
+        Const(o, 4 + n, f.U8());
+      } else if ((c & 0xE0) == 0x60) {
+        Rep(o, c & 0x1F, lastO);
+      } else {
+        int n = (c >> 5) & 0x03;
+        lastO = ((c & 0x1F) << 8) | f.U8();
+        Rep(o, 4 + n, lastO);
+      }
+    }
+  }
+
+  public static byte[] Decompress(byte[] data) {
+    var o = new List<byte>();
+    if (data.Length > 0 && data[0] == 0) Mode2(data, o); else Mode1(data, o);
+    return o.ToArray();
+  }
+}
+
+public static class Ed6 {
+  public static byte[] Decompress(byte[] data) {
+    var f = new MemoryStream(data);
+    var br = new BinaryReader(f);
+    var o = new List<byte>();
+    while (true) {
+      int len = br.ReadUInt16() - 2;
+      byte[] chunk = br.ReadBytes(len);
+      o.AddRange(Bz.Decompress(chunk));
+      if (br.ReadByte() == 0) break;
+    }
+    return o.ToArray();
+  }
+
+  public static byte[] CompressLiterals(byte[] data) {
+    var chunks = new List<byte[]>();
+    int pos = 0;
+    while (pos < data.Length) {
+      int n = Math.Min(0xF000, data.Length - pos);
+      var enc = new List<byte>();
+      int i = 0;
+      while (i < n) {
+        int m = Math.Min(n - i, 8191);
+        if (m <= 31) enc.Add((byte)m);
+        else { enc.Add((byte)(0x20 | (m >> 8))); enc.Add((byte)(m & 0xFF)); }
+        for (int k = 0; k < m; k++) enc.Add(data[pos + i + k]);
+        i += m;
+      }
+      chunks.Add(enc.ToArray());
+      pos += n;
+    }
+    var o = new List<byte>();
+    for (int c = 0; c < chunks.Count; c++) {
+      o.AddRange(BitConverter.GetBytes((ushort)(chunks[c].Length + 2)));
+      o.AddRange(chunks[c]);
+      o.Add((byte)(chunks.Count - 1 - c));
+    }
+    return o.ToArray();
+  }
+
+  public static byte[] Argb1555ToBgra(byte[] raw) {
+    var o = new byte[raw.Length * 2];
+    for (int i = 0, j = 0; i < raw.Length; i += 2, j += 4) {
+      int v = raw[i] | (raw[i + 1] << 8);
+      int a = (v & 0x8000) != 0 ? 255 : 0;
+      int r = (v >> 10) & 0x1F, g = (v >> 5) & 0x1F, b = v & 0x1F;
+      o[j] = (byte)((b << 3) | (b >> 2));
+      o[j + 1] = (byte)((g << 3) | (g >> 2));
+      o[j + 2] = (byte)((r << 3) | (r >> 2));
+      o[j + 3] = (byte)a;
+    }
+    return o;
   }
 }
 '@
@@ -157,9 +316,10 @@ if ($Restore) {
       Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
   }
   if (-not $BackupDir -or -not (Test-Path "$BackupDir\ED6_DT21.dat")) { Fail "找不到备份（$BackupDir）" }
-  foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22') {
-    Copy-Item "$BackupDir\$a.dat", "$BackupDir\$a.dir" $GameDir -Force
+  foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24') {
+    if (Test-Path "$BackupDir\$a.dat") { Copy-Item "$BackupDir\$a.dat", "$BackupDir\$a.dir" $GameDir -Force }
   }
+  if (Test-Path "$BackupDir\ED6_DT51.dat") { Copy-Item "$BackupDir\ED6_DT51.dat" $GameDir -Force }
   Remove-Item "$GameDir\dll\lang_jpn.dll" -Force -ErrorAction SilentlyContinue
   if (Test-Path "$BackupDir\ed6_win3.ini") { Copy-Item "$BackupDir\ed6_win3.ini" $ini -Force }
   Ok "已从 $BackupDir 还原为英文原版"
@@ -188,9 +348,10 @@ Ok "日文版：$jpDir"
 # ---------- 备份 ----------
 $bk = Join-Path $backupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
 New-Item -ItemType Directory -Force $bk | Out-Null
-foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22') {
+foreach ($a in 'ED6_DT20', 'ED6_DT21', 'ED6_DT22', 'ED6_DT24') {
   Copy-Item "$GameDir\$a.dat", "$GameDir\$a.dir" $bk
 }
+if ($StaffRoll -and (Test-Path "$GameDir\ED6_DT51.dat")) { Copy-Item "$GameDir\ED6_DT51.dat" $bk }
 if (Test-Path $ini) { Copy-Item $ini $bk }
 Ok "英文原版已备份到 $bk"
 
@@ -212,27 +373,96 @@ if ($need22.Count) { $jp22.GraftFrom($en22, $need22) }
 $jp22.Save("$GameDir\ED6_DT22.dir", "$GameDir\ED6_DT22.dat")
 Ok "DT22：日版文本库 $($jp22.Count) 项 + 回填英文版独有 $($need22.Count) 项（T_BTREV 为引擎启动必需）"
 
-# ---------- DT20 原版字体 ----------
+# ---------- DT20 字体 + 界面素材 ----------
 if ($KeepHdFont) {
   Write-Host '跳过字体（保留 XSEED 高清字体）'
 } else {
   Write-Host '处理 DT20（日版原点位图字体 FONT8-FONT32）…'
   $en20 = [LB]::Load("$GameDir\ED6_DT20.dir", "$GameDir\ED6_DT20.dat")
   $jp20 = [LB]::Load("$jpDir\ED6_DT20.dir", "$jpDir\ED6_DT20.dat")
-  $en20.ReplaceFrom($jp20, 'FONT8', 'FONT12', 'FONT16', 'FONT20', 'FONT24', 'FONT32')
+  $en20.ReplaceFrom($jp20, $false, 'FONT8', 'FONT12', 'FONT16', 'FONT20', 'FONT24', 'FONT32')
   $en20.Save("$GameDir\ED6_DT20.dir", "$GameDir\ED6_DT20.dat")
-  Ok 'DT20：6 档原版字体已换入'
+  Ok 'DT20 字体：6 档原版字体已换入'
 }
 
-# ---------- 日文菜单开关 + 经典渲染 ----------
+if (-not $NoTextures) {
+  Write-Host '处理 DT20 界面素材（SUBTI/STATUS/ICON/NOTE）…'
+  $en20t = [LB]::Load("$GameDir\ED6_DT20.dir", "$GameDir\ED6_DT20.dat")
+  $jp20t = [LB]::Load("$jpDir\ED6_DT20.dir", "$jpDir\ED6_DT20.dat")
+  $en20t.ReplaceFrom($jp20t, $true, 'C_SUBTI', 'C_STATUS._CH', 'C_ICON1', 'C_NOTE1')
+
+  Write-Host '处理角色立绘 C_STCH（ARGB1555 → 32bpp 转换）…'
+  $stchNames = @()
+  foreach ($i in 0..18) { $stchNames += ('C_STCH{0:00}._CH' -f $i) }
+  $stchNames += 'C_STCH32._CH', 'C_STCH35._CH', 'C_STCH36._CH'
+  $conv = 0
+  foreach ($n in $stchNames) {
+    $si = $jp20t.Find($n); $bi = $en20t.Find($n)
+    if ($si -lt 0 -or $bi -lt 0) { continue }
+    $raw = [Ed6]::Decompress($jp20t.Contents[$si])
+    if ($raw.Length -ne (512 * 512 * 2)) { Write-Host "  [跳过] $n（raw $($raw.Length)）"; continue }
+    $bgra = [Ed6]::Argb1555ToBgra($raw)
+    $packed = [Ed6]::CompressLiterals($bgra)
+    $en20t.Contents[$bi] = $packed
+    $en20t.SetFields($bi, $packed.Length, 0x00080000)
+    $conv++
+  }
+  $en20t.Save("$GameDir\ED6_DT20.dir", "$GameDir\ED6_DT20.dat")
+  Ok "DT20 素材：界面素材换入 + $conv 张立绘转为 32bpp（修复 16 位色不渲染问题）"
+
+  Write-Host '处理 DT24（剧情卡/地名卡/门标题卡/标题界面）…'
+  $en24 = [LB]::Load("$GameDir\ED6_DT24.dir", "$GameDir\ED6_DT24.dat")
+  $jp24 = [LB]::Load("$jpDir\ED6_DT24.dir", "$jpDir\ED6_DT24.dat")
+  $names = @()
+  for ($i = 0; $i -lt $en24.Count; $i++) { if ($en24.Names[$i] -like 'C_*') { $names += $en24.Names[$i] } }
+  $en24.ReplaceFrom($jp24, $true, [string[]]$names)
+  $en24.Save("$GameDir\ED6_DT24.dir", "$GameDir\ED6_DT24.dat")
+  Ok "DT24：$($names.Count) 项素材换为日版"
+}
+
+# ---------- 结尾 STAFF 表（可选） ----------
+if ($StaffRoll) {
+  $jp51 = Join-Path $jpDir 'ED6_DT51.dat'
+  if (Test-Path $jp51) {
+    $ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    $imgFf = Join-Path $env:APPDATA 'Python\Python310\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe'
+    if ($ff) { $ffmpeg = $ff.Source }
+    elseif (Test-Path $imgFf) { $ffmpeg = $imgFf }
+    else { $ffmpeg = $null }
+    if ($ffmpeg) {
+      Write-Host '转码结尾 STAFF 表为 XviD AVI（日版原片，含 Evolution 声优表）…'
+      & $ffmpeg -hide_banner -loglevel error -y -i $jp51 -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 `
+        -c:v libxvid -qscale:v 4 -vf "scale=1920:960,pad=1920:1080:0:60" -r 30 -c:a libmp3lame -b:a 192k -shortest `
+        "$GameDir\ED6_DT51.dat"
+      if ($LASTEXITCODE -ne 0) { Fail 'ffmpeg 转码失败' }
+      Ok 'ED6_DT51：日版结尾 STAFF 表（XviD AVI，可播放）'
+    } else {
+      Copy-Item $jp51 "$GameDir\ED6_DT51.dat" -Force
+      Write-Host '  [注意] 未找到 ffmpeg，已直接拷入日版 MPEG；若结尾影像无法播放，请安装 LAV Filters 或提供 ffmpeg 后重跑。'
+    }
+  } else {
+    Write-Host '  [注意] 日文版中未找到 ED6_DT51.dat，跳过结尾 STAFF 表。'
+  }
+}
+
+# ---------- 日文菜单开关 + 渲染设置 ----------
 New-Item -ItemType File -Force "$GameDir\dll\lang_jpn.dll" | Out-Null
 Ok 'dll\lang_jpn.dll（日文菜单开关）'
-if (-not $KeepHdFont -and (Test-Path $ini)) {
-  (Get-Content $ini) -replace '^HighResoText=\d', 'HighResoText=0' | Set-Content $ini -Encoding ASCII
-  Ok 'ed6_win3.ini: HighResoText=0（经典字体渲染，修复名称/正文漂移）'
+if (Test-Path $ini) {
+  $c = Get-Content $ini
+  if (-not $KeepHdFont) {
+    $c = $c -replace '^HighResoText=\d', 'HighResoText=0'
+    Ok 'ed6_win3.ini: HighResoText=0（经典字体渲染，修复名称/正文漂移）'
+  }
+  if (-not $NoTextures) {
+    $c = $c -replace '^HighResoAssets=\d', 'HighResoAssets=0'
+    Ok 'ed6_win3.ini: HighResoAssets=0（使用日版标准素材，标题/卡片全部日文）'
+  }
+  $c | Set-Content $ini -Encoding ASCII
 }
 
 if ($tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 
-Write-Host "`n完成。启动游戏即为日文原版体验（贴图类如 LOGO/按钮仍为英文，见 README）。"
+Write-Host "`n完成。启动游戏即为日文原版体验（详见 README）。"
+Write-Host "说明：START/EASY 等按钮与 Now Loading 在日版原版中即为英文，属正常现象。"
 Write-Host "如需还原英文版：执行 还原.bat 或本脚本加 -Restore"
