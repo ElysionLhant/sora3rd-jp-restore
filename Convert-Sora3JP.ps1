@@ -389,7 +389,20 @@ if (-not $NoTextures) {
   Write-Host '处理 DT20 界面素材（SUBTI/STATUS/ICON/NOTE）…'
   $en20t = [LB]::Load("$GameDir\ED6_DT20.dir", "$GameDir\ED6_DT20.dat")
   $jp20t = [LB]::Load("$jpDir\ED6_DT20.dir", "$jpDir\ED6_DT20.dat")
-  $en20t.ReplaceFrom($jp20t, $true, 'C_SUBTI', 'C_STATUS._CH', 'C_ICON1', 'C_NOTE1')
+  $en20t.ReplaceFrom($jp20t, $true, 'C_STATUS._CH', 'C_ICON1', 'C_NOTE1')
+
+  # C_SUBTI（英文版副标题装饰卡）：日版尺寸/像素格式与英文版引擎的读法不匹配，
+  # 直接替换会出现"一张变两张+乱码"，升格又会因引擎的 G 通道优先读法变绿。
+  # 最干净的处理是写入一张全 0x03E0（alpha=0）的卡使其完全透明（隐身）。
+  $si = $en20t.Find('C_SUBTI')
+  if ($si -ge 0) {
+    $bytes = [byte[]]::CreateInstance(512 * 256 * 2)
+    for ($i = 0; $i -lt $bytes.Length; $i += 2) { $bytes[$i] = 0xE0; $bytes[$i + 1] = 0x03 }
+    $packed = [Ed6]::CompressLiterals($bytes)
+    $en20t.Contents[$si] = $packed
+    $en20t.SetFields($si, $packed.Length, 0x00010000)
+    Ok '  C_SUBTI：装饰卡已隐身（全透明，不再出现乱码/变绿）'
+  }
 
   Write-Host '处理角色立绘 C_STCH（ARGB1555 → 32bpp 转换）…'
   $stchNames = @()
