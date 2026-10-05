@@ -153,7 +153,7 @@ def seg_strong_tokens(items, seg, strip_voice=False):
     return set(tok_re.findall(txt))
 
 
-def merge_file(j31_path, jp_path, report, injections, use_global_sig=False):
+def merge_file(j31_path, jp_path, report, injections, line_inserts, use_global_sig=False):
     """Align one J31 file against one JP file; record injections.
     injections: dict jp_path -> list of (lineno, col, voice_id, tag, ctx)."""
     name = os.path.basename(j31_path)
@@ -251,13 +251,15 @@ def merge_file(j31_path, jp_path, report, injections, use_global_sig=False):
         segs31 = segments(items31)
         segsjp = segments(itemsjp)
 
-        # fold voice-only segments: carry their voice ids to next segment
-        filtered31 = []   # [orig_seg, [voice_ids]]
+        # fold voice-only segments: carry their voice entries to next segment
+        filtered31 = []   # [orig_seg, [(vid, body), ...]]
         pending = []
         for seg in segs31:
             if is_voice_only_seg(items31, seg):
-                txt = ''.join(seg_lits(items31, seg))
-                pending.append(voice_re.match(txt).group(1))
+                for b in seg_lits(items31, seg):
+                    m = voice_re.match(b)
+                    if m:
+                        pending.append((m.group(1), b))
                 stats['voice_only_seg'] += 1
                 continue
             ids = pending
@@ -267,7 +269,7 @@ def merge_file(j31_path, jp_path, report, injections, use_global_sig=False):
                 if kind == 'lit':
                     m = voice_re.match(body)
                     if m:
-                        ids.append(m.group(1))
+                        ids.append((m.group(1), body))
             filtered31.append((seg, ids))
         if pending:
             if filtered31:
@@ -341,66 +343,97 @@ def merge_file(j31_path, jp_path, report, injections, use_global_sig=False):
                     tag_conf.append('token_anchor')
             if tgt is None or tgt in used_jp or tgt >= len(segsjp):
                 stats['drop_no_target'] += len(ids)
-                for vid in ids:
+                for vid, _ in ids:
                     report.append(f'{name}: drop #{vid}v (no target, run@tok{j31_tok_idx})')
                 continue
             used_jp.add(tgt)
             segjp = segsjp[tgt]
-            # target literal = first lit item of jp segment; skip bare names
-            tgt_lit = first_lit_idx(itemsjp, segjp)
-            if tgt_lit is not None and esc_codes(itemsjp[tgt_lit][1]) == set():
-                nxt = first_lit_idx(itemsjp, [tgt_lit + 1, segjp[1]])
-                if nxt is not None:
-                    tgt_lit = nxt
-                    tag_conf.append('skip_name')
-                else:
-                    tgt_lit = None
-            if tgt_lit is None:
-                stats['drop_name_only_target'] += len(ids)
-                for vid in ids:
+            # compute fused-voice target literal + marker confidence lazily,
+            # only when a non-bare (fused) voice exists in this segment
+            fused_state = None
+
+            def fused_target():
+                nonlocal fused_state
+                if fused_state is not None:
+                    return fused_state
+                tgt_lit = first_lit_idx(itemsjp, segjp)
+                tag_c = []
+                if tgt_lit is not None and esc_codes(itemsjp[tgt_lit][1]) == set():
+                    nxt = first_lit_idx(itemsjp, [tgt_lit + 1, segjp[1]])
+                    if nxt is not None:
+                        tgt_lit = nxt
+                        tag_c.append('skip_name')
+                    else:
+                        tgt_lit = None
+                tag_m = 'both_nomarker'
+                if tgt_lit is not None:
+                    fl = first_lit_idx(items31, seg31)
+                    rest = ''
+                    if fl is not None:
+                        vm = voice_re.match(items31[fl][1])
+                        if vm:
+                            rest = items31[fl][1][vm.end():]
+                    mm = marker_re.match(rest)
+                    mj = marker_re.match(itemsjp[tgt_lit][1])
+                    if mm and mj:
+                        tag_m = 'marker_ok' if mm.group(1) == mj.group(1) else 'marker_diff'
+                    elif mm and not mj:
+                        tag_m = 'cn_marker_only'
+                    elif mj and not mm:
+                        tag_m = 'jp_marker_only'
+                tag_c.append(tag_m)
+                if pair_kind != 'eq':
+                    tag_c.append('global_sig' if pair_kind == 'gs' else 'replace_block')
+                fused_state = (tgt_lit, tag_c, tag_m)
+                return fused_state
+
+            fused_done = False
+            for vid, ebody in ids:
+                vbody = ebody[voice_re.match(ebody).end():]
+                if esc_re.sub('', vbody).strip() == '':
+                    # bare voice directive (standalone literal in CN) —
+                    # replicate J31why's structure instead of fusing
+                    jp_first = first_lit_idx(itemsjp, segjp)
+                    jp_body = itemsjp[jp_first][1] if jp_first is not None else None
+                    if jp_body is not None and vbody == jp_body:
+                        _, _, ln, col = itemsjp[jp_first]
+                        injections[jp_path].append((ln, col, vid, 9, 'bare_match', name))
+                        stats['injected'] += 1
+                        stats['conf_bare_match'] += 1
+                    else:
+                        ln = itemsjp[segjp[0]][2]
+                        line_inserts[jp_path].append((ln, ebody, name))
+                        stats['injected'] += 1
+                        stats['conf_standalone_insert'] += 1
+                    continue
+                # fused voice (voice prefix inside a real text literal)
+                if fused_done:
+                    stats['drop_extra_voice_in_seg'] += 1
+                    report.append(f'{name}: drop extra #{vid}v in seg (run@tok{j31_tok_idx})')
+                    continue
+                tgt_lit, tag_conf, tag_m = fused_target()
+                if tgt_lit is None:
+                    stats['drop_name_only_target'] += 1
                     report.append(f'{name}: drop #{vid}v (target is bare name, '
                                   f'run@tok{j31_tok_idx})')
-                continue
-            # confidence: marker comparison of first voice vs jp target
-            tag_m = 'both_nomarker'
-            fl = first_lit_idx(items31, seg31)
-            rest = ''
-            if fl is not None:
-                vm = voice_re.match(items31[fl][1])
-                if vm:
-                    rest = items31[fl][1][vm.end():]
-            mm = marker_re.match(rest)
-            mj = marker_re.match(itemsjp[tgt_lit][1])
-            if mm and mj:
-                tag_m = 'marker_ok' if mm.group(1) == mj.group(1) else 'marker_diff'
-            elif mm and not mj:
-                tag_m = 'cn_marker_only'
-            elif mj and not mm:
-                tag_m = 'jp_marker_only'
-            tag_conf.append(tag_m)
-            if pair_kind != 'eq':
-                tag_conf.append('global_sig' if pair_kind == 'gs' else 'replace_block')
-            # token-anchored guesses with conflicting face markers are
-            # almost certainly different lines — refuse them
-            if 'token_anchor' in tag_conf and tag_m == 'marker_diff':
-                stats['drop_token_marker_conflict'] += len(ids)
-                for vid in ids:
+                    continue
+                # token-anchored guesses with conflicting face markers are
+                # almost certainly different lines — refuse them
+                if 'token_anchor' in tag_conf and tag_m == 'marker_diff':
+                    stats['drop_token_marker_conflict'] += 1
                     report.append(f'{name}: drop #{vid}v (token anchor but marker '
                                   f'conflict, run@tok{j31_tok_idx})')
-                continue
-            vid = ids[0]
-            stats['injected'] += 1
-            SCORES = {'marker_ok': 10, 'marker_anchor': 8, 'jp_marker_only': 6,
-                      'cn_marker_only': 5, 'marker_diff': 4, 'both_nomarker': 3,
-                      'ordinal_fallback': -2, 'token_anchor': 7, 'replace_block': -2, 'global_sig': 6, 'skip_name': 0}
-            score = sum(SCORES.get(t, 0) for t in tag_conf)
-            for t in tag_conf:
-                stats['conf_' + t] += 1
-            _, _, ln, col = itemsjp[tgt_lit]
-            injections[jp_path].append((ln, col, vid, score, '+'.join(tag_conf), name))
-            for vid in ids[1:]:
-                stats['drop_extra_voice_in_seg'] += 1
-                report.append(f'{name}: drop extra #{vid}v in seg (run@tok{j31_tok_idx})')
+                    continue
+                fused_done = True
+                stats['injected'] += 1
+                SCORES = {'marker_ok': 10, 'marker_anchor': 8, 'jp_marker_only': 6,
+                          'cn_marker_only': 5, 'marker_diff': 4, 'both_nomarker': 3,
+                          'ordinal_fallback': -2, 'token_anchor': 7, 'replace_block': -2, 'global_sig': 6, 'skip_name': 0}
+                score = sum(SCORES.get(t, 0) for t in tag_conf)
+                for t in tag_conf:
+                    stats['conf_' + t] += 1
+                _, _, ln, col = itemsjp[tgt_lit]
+                injections[jp_path].append((ln, col, vid, score, '+'.join(tag_conf), name))
     return stats
 
 
@@ -428,7 +461,10 @@ def main():
     for fl, f in jp_files.items():
         jp_fams[fambase(fl)].append(f)
 
-    # build (j31, jp) pair jobs; family mode when either side has _N members
+    # build (j31, jp) pair jobs; family mode when either side has _N members.
+    # NOTE: EN and JP pack scenario content at different boundaries even
+    # within same-count families (JP packs more into early files), so
+    # cross-file pairing is legitimate and required for complete coverage.
     jobs = []  # (j31_path, jp_path, family_mode)
     seen_pairs = set()
     for base, members in sorted(j31_fams.items()):
@@ -444,6 +480,7 @@ def main():
                     jobs.append(pair)
 
     injections = collections.defaultdict(list)  # jp_path -> [(ln,col,vid,score,tag,src)]
+    line_inserts = collections.defaultdict(list)  # jp_path -> [(ln, body, src)]
     report = []
     total = collections.Counter()
     pair_scores = {}  # (j31,jp) -> marker_ok count
@@ -457,11 +494,12 @@ def main():
     pair_results = {}
     for j31_path, jp_path, family_mode in jobs:
         per_pair = collections.defaultdict(list)
+        per_ins = collections.defaultdict(list)
         rep = []
-        st = merge_file(j31_path, jp_path, rep, per_pair)
+        st = merge_file(j31_path, jp_path, rep, per_pair, per_ins)
         quality = st.get('conf_marker_ok', 0) + st.get('conf_both_nomarker', 0)
         pair_scores[(j31_path, jp_path)] = quality
-        pair_results[(j31_path, jp_path)] = (st, per_pair, rep)
+        pair_results[(j31_path, jp_path)] = (st, per_pair, per_ins, rep)
 
     # best pair per j31 file (exact-name match wins ties)
     best_pair = {}
@@ -477,12 +515,13 @@ def main():
         is_best = best_pair[j31_path][1] == jp_path
         if is_best:
             per_pair = collections.defaultdict(list)
+            per_ins = collections.defaultdict(list)
             rep = []
-            st = merge_file(j31_path, jp_path, rep, per_pair, use_global_sig=True)
+            st = merge_file(j31_path, jp_path, rep, per_pair, per_ins, use_global_sig=True)
             quality = st.get('conf_marker_ok', 0) + st.get('conf_both_nomarker', 0)
             pair_scores[(j31_path, jp_path)] = quality
-            pair_results[(j31_path, jp_path)] = (st, per_pair, rep)
-        st, per_pair, rep = pair_results[(j31_path, jp_path)]
+            pair_results[(j31_path, jp_path)] = (st, per_pair, per_ins, rep)
+        st, per_pair, per_ins, rep = pair_results[(j31_path, jp_path)]
         total.update(st)
         report.extend(rep)
         quality = pair_scores[(j31_path, jp_path)]
@@ -491,12 +530,16 @@ def main():
             continue
         for jp_p, lst in per_pair.items():
             injections[jp_p].extend(lst)
+        for jp_p, lst in per_ins.items():
+            line_inserts[jp_p].extend(lst)
 
     # dedupe: by (jp_path, ln, col) keep highest score; global vid dedupe
     applied = 0
     collisions = 0
     vid_seen = set()
-    for jp_path, inj in injections.items():
+    all_paths = list(dict.fromkeys(list(injections.keys()) + list(line_inserts.keys())))
+    for jp_path in all_paths:
+        inj = injections.get(jp_path, [])
         inj.sort(key=lambda x: -x[3])
         taken = set()
         kept = []
@@ -525,6 +568,23 @@ def main():
         for ln, col, vid in kept:
             lines[ln] = lines[ln][:col] + f'#{vid}v' + lines[ln][col:]
             applied += 1
+        # standalone voice-literal inserts (after col edits; bottom-up,
+        # grouped by target line preserving CN order)
+        ins_list = line_inserts.get(jp_path, [])
+        seen_ins = set()
+        grouped = collections.defaultdict(list)
+        for ln, body, src in ins_list:
+            if (ln, body) in seen_ins:
+                continue
+            seen_ins.add((ln, body))
+            grouped[ln].append(body)
+        for ln in sorted(grouped, reverse=True):
+            indent = lines[ln][:len(lines[ln]) - len(lines[ln].lstrip())]
+            block = ''.join(indent + '"' + b + '",' + chr(10) for b in grouped[ln])
+            lines.insert(ln, block)
+            applied += len(grouped[ln])
+            stats_line = f'{os.path.basename(jp_path)}: inserted {len(grouped[ln])} standalone voice line(s) before line {ln}'
+            report.append(stats_line)
         out = os.path.join(OUT_DIR, os.path.basename(jp_path))
         with open(out, 'w', encoding='utf-8', newline='\n') as f:
             f.writelines(lines)

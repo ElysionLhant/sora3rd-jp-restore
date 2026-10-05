@@ -277,6 +277,52 @@ public static class Ed6 {
     return o.ToArray();
   }
 
+  // bzip mode2（位级 LZSS）纯字面量压缩——贴图类条目引擎只认 mode2，
+  // mode1 会让引擎解码出错误长度导致崩溃。逐段自包含（每段带终止符）。
+  public static byte[] CompressMode2(byte[] data) {
+    int n = data.Length;
+    var o = new List<byte>();
+    int bytepos = 0, oppos = 0, totalOps = n + 7;
+    bool first = true;
+    while (oppos < totalOps) {
+      int cap = first ? 8 : 16;
+      int take = Math.Min(cap, totalOps - oppos);
+      ushort u16 = 0;
+      for (int j = 0; j < take; j++) {
+        int op = oppos + j;
+        if (op == n || op == n + 1)  // 终止符的前两个 1 位
+          u16 |= (ushort)(1 << (first ? j + 8 : j));
+      }
+      o.AddRange(BitConverter.GetBytes(u16));
+      int segStart = oppos; oppos += take; first = false;
+      int segEnd = oppos;
+      int lits = Math.Max(0, Math.Min(segEnd, n) - Math.Min(segStart, n));
+      for (int k = 0; k < lits; k++) o.Add(data[bytepos++]);
+      if (segStart <= n + 6 && n + 6 < segEnd) o.Add((byte)0);  // bits(13) 的尾字节
+    }
+    return o.ToArray();
+  }
+
+  // mode2 的 ed6 容器：把数据切成 0x8000 一段，每段独立 bzip 流，
+  // 容器 = u16 块长 + 块 + u8 递减续块标志（末块为 0）。
+  public static byte[] CompressMode2Container(byte[] data) {
+    int seg = 0x8000;
+    var chunks = new List<byte[]>();
+    for (int i = 0; i < data.Length; i += seg) {
+      int m = Math.Min(seg, data.Length - i);
+      var part = new byte[m];
+      Buffer.BlockCopy(data, i, part, 0, m);
+      chunks.Add(CompressMode2(part));
+    }
+    var o = new List<byte>();
+    for (int c = 0; c < chunks.Count; c++) {
+      o.AddRange(BitConverter.GetBytes((ushort)(chunks[c].Length + 2)));
+      o.AddRange(chunks[c]);
+      o.Add((byte)(chunks.Count - 1 - c));
+    }
+    return o.ToArray();
+  }
+
   public static byte[] Argb1555ToBgra(byte[] raw) {
     var o = new byte[raw.Length * 2];
     for (int i = 0, j = 0; i < raw.Length; i += 2, j += 4) {
@@ -429,6 +475,37 @@ if (-not $NoTextures) {
   $names = @()
   for ($i = 0; $i -lt $en24.Count; $i++) { if ($en24.Names[$i] -like 'C_*') { $names += $en24.Names[$i] } }
   $en24.ReplaceFrom($jp24, $true, [string[]]$names)
+
+  # C_PLAC31-43 尺寸修正：英文版这几张为 512×512（524288 字节），日版为 256×256（131072）。
+  # 直接替换会让引擎按 512² 读取越界（nvd3dum 驱动崩溃）——把日版最近邻放大到 512²。
+  $en24bak = [LB]::Load("$bk\ED6_DT24.dir", "$bk\ED6_DT24.dat")
+  $placFixed = 0
+  for ($k = 31; $k -le 43; $k++) {
+    $nm = 'C_PLAC{0:d2}._CH' -f $k
+    $bi = $en24.Find($nm); $jb = $en24bak.Find($nm)
+    if ($bi -lt 0 -or $jb -lt 0) { continue }
+    $rawJ = [Ed6]::Decompress($en24.Contents[$bi])
+    $rawE = [Ed6]::Decompress($en24bak.Contents[$jb])
+    if ($rawJ.Length -eq (256 * 256 * 2) -and $rawE.Length -eq (512 * 512 * 2)) {
+      $big = [byte[]]::new($rawE.Length)
+      $sw = 512
+      for ($y = 0; $y -lt 256; $y++) {
+        $row = [byte[]]::new($sw * 2)
+        for ($x = 0; $x -lt 256; $x++) {
+          $p0 = ($y * 256 + $x) * 2
+          $row[$x * 4] = $rawJ[$p0]; $row[$x * 4 + 1] = $rawJ[$p0 + 1]
+          $row[$x * 4 + 2] = $rawJ[$p0]; $row[$x * 4 + 3] = $rawJ[$p0 + 1]
+        }
+        [Array]::Copy($row, 0, $big, ($y * 2) * $sw * 2, $sw * 2)
+        [Array]::Copy($row, 0, $big, ($y * 2 + 1) * $sw * 2, $sw * 2)
+      }
+      $packed = [Ed6]::CompressMode2Container($big)
+      $en24.Contents[$bi] = $packed
+      $en24.SetFields($bi, $packed.Length, 0x00030000)
+      $placFixed++
+    }
+  }
+  if ($placFixed -gt 0) { Ok "  C_PLAC31-43：$placFixed 张日版 256² 地名卡已放大为 512²（匹配英文版槽位尺寸）" }
 
   # C_TITLE1 特殊处理：整包替换会让难度按钮丢失（日版图集布局不同）——
   # 合成"日版顶部 185 行（空轨 logo）+ 英文版底部（按钮/装饰）"
