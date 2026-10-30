@@ -41,6 +41,7 @@ Steam 英文版在 >21:9 的分辨率下 UI 直接散架——标题漂移、元
 | 战斗招式名 | `ED6_DT30` 全部 `AS/MS` 战斗脚本（主角战技 + 敌方招式，共 1350 项）→ 日版 |
 | 结尾 STAFF 表 | `ED6_DT51` → 日版原片（含 Evolution 声优表；`-StaffRoll` 开启，有 ffmpeg 时自动转码为可播放的 XviD AVI） |
 | 剧情语音 | （可选，`extras/voice/`）Evo 版全剧情语音注入：语音 ID 按结构对齐灌入日版剧本，日文本 + 日语音 |
+| 星门 3 对话修复 | （`extras/star3-dialogue/`）修复完整语音剧本超过 64 KiB 后 NPC 对话无法触发的问题；保留 88 个函数与 730 个语音标签，部分 NPC 语音仍缺失 |
 | 菜单 | 写入 `dll\lang_jpn.dll`，系统菜单/设置界面日文 |
 | 渲染 | `HighResoText=0`（经典字体渲染，修复排版漂移）、`HighResoAssets=0`（使用日版标准素材） |
 | 还原 | 任意时刻一键还原英文原版（转换前自动备份） |
@@ -138,6 +139,7 @@ Convert-Sora3JP.ps1        核心转换/还原脚本（PS + 内嵌 C# 封包器/
 还原.bat                    双击用：还原英文版
 extras\16x9-pillarbox\      超宽屏伪全屏小工具（watch.ps1 + steamwrap.bat，相对路径）
 extras\voice\               剧情语音注入管线（voice_merge.py + 文档，需自备 J31why 语音包）
+extras\star3-dialogue\      星门 3 对话触发与 64 KiB 扩展修复（生成器 + 离线验证）
 backup\                     自动备份（每次转换一份时间戳副本，本地产物勿上传）
 README.md                   本文档
 .gitignore                  排除 backup\ 与游戏数据文件

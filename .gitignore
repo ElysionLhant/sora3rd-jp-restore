@@ -3,3 +3,5 @@ backup/
 *.zip
 ED6_*.dat
 ED6_*.dir
+__pycache__/
+*.pyc
